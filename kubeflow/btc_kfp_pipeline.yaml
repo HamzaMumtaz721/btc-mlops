@@ -1,0 +1,238 @@
+# PIPELINE DEFINITION
+# Name: btc-7day-forecast
+# Inputs:
+#    mape_threshold: float [Default: 15.0]
+#    start_date: str [Default: '2018-01-01']
+components:
+  comp-build-features:
+    executorLabel: exec-build-features
+    inputDefinitions:
+      artifacts:
+        raw_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      artifacts:
+        features:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-ingest-data:
+    executorLabel: exec-ingest-data
+    inputDefinitions:
+      parameters:
+        start_date:
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        raw_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-train-model:
+    executorLabel: exec-train-model
+    inputDefinitions:
+      artifacts:
+        features:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        mape_threshold:
+          defaultValue: 15.0
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-build-features:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - build_features
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.18.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef build_features(raw_data: Input[Dataset], features: Output[Dataset]):\n\
+          \    import numpy as np\n    import pandas as pd\n\n    df = pd.read_csv(raw_data.path,\
+          \ parse_dates=[\"date\"]).sort_values(\"date\")\n    s = df[\"close\"].astype(float).reset_index(drop=True)\n\
+          \    r = np.log(s).diff()\n    out = pd.DataFrame({\"date\": df[\"date\"\
+          ].values, \"close\": s})\n    for i in range(1, 8):\n        out[f\"ret_lag{i}\"\
+          ] = r.shift(i - 1)\n    out[\"ma7_ratio\"] = s.rolling(7).mean() / s\n \
+          \   out[\"ma30_ratio\"] = s.rolling(30).mean() / s\n    out[\"vol7\"] =\
+          \ r.rolling(7).std()\n    out[\"vol30\"] = r.rolling(30).std()\n    out[\"\
+          target\"] = r.shift(-1)\n    out.to_csv(features.path, index=False)\n\n"
+        image: python:3.10-slim
+    exec-ingest-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - ingest_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \ 'yfinance'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.18.1' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef ingest_data(start_date: str, raw_data: Output[Dataset]):\n  \
+          \  import numpy as np\n    import pandas as pd\n\n    try:\n        import\
+          \ yfinance as yf\n\n        df = yf.download(\"BTC-USD\", start=start_date,\
+          \ progress=False, auto_adjust=False)\n        if df.empty:\n           \
+          \ raise RuntimeError(\"no data\")\n        if isinstance(df.columns, pd.MultiIndex):\n\
+          \            df.columns = df.columns.get_level_values(0)\n        df = df.reset_index().rename(columns=str.lower)\n\
+          \        df = df[[\"date\", \"open\", \"high\", \"low\", \"close\", \"volume\"\
+          ]]\n    except Exception:\n        rng = np.random.default_rng(1)\n    \
+          \    close = 20000 * np.exp(np.cumsum(rng.normal(0.0008, 0.03, 1500)))\n\
+          \        dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=1500)\n\
+          \        df = pd.DataFrame({\"date\": dates, \"close\": close})\n    df.to_csv(raw_data.path,\
+          \ index=False)\n\n"
+        image: python:3.10-slim
+    exec-train-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \ 'scikit-learn==1.5.1' 'joblib'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.18.1' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_model(\n    features: Input[Dataset],\n    model: Output[Model],\n\
+          \    metrics: Output[Metrics],\n    mape_threshold: float = 15.0,\n):\n\
+          \    import joblib\n    import numpy as np\n    import pandas as pd\n  \
+          \  from sklearn.ensemble import GradientBoostingRegressor\n\n    df = pd.read_csv(features.path).dropna().reset_index(drop=True)\n\
+          \    cols = [c for c in df.columns if c not in (\"date\", \"close\", \"\
+          target\")]\n    train, test = df.iloc[:-7], df.iloc[-7:]\n    m = GradientBoostingRegressor(n_estimators=150,\
+          \ max_depth=3, random_state=42)\n    m.fit(train[cols], train[\"target\"\
+          ])\n    pred_close = test[\"close\"] * np.exp(m.predict(test[cols]))\n \
+          \   actual = test[\"close\"] * np.exp(test[\"target\"])\n    err = actual\
+          \ - pred_close\n    mape = float((err.abs() / actual).mean() * 100)\n  \
+          \  metrics.log_metric(\"mae\", float(err.abs().mean()))\n    metrics.log_metric(\"\
+          rmse\", float((err**2).mean() ** 0.5))\n    metrics.log_metric(\"mape\"\
+          , mape)\n    if mape > mape_threshold:\n        raise ValueError(f\"MAPE\
+          \ {mape:.2f} above threshold {mape_threshold}\")\n    m.fit(df[cols], df[\"\
+          target\"])\n    joblib.dump(m, model.path)\n\n"
+        image: python:3.10-slim
+pipelineInfo:
+  name: btc-7day-forecast
+root:
+  dag:
+    tasks:
+      build-features:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-build-features
+        dependentTasks:
+        - ingest-data
+        inputs:
+          artifacts:
+            raw_data:
+              taskOutputArtifact:
+                outputArtifactKey: raw_data
+                producerTask: ingest-data
+        taskInfo:
+          name: build-features
+      ingest-data:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-ingest-data
+        inputs:
+          parameters:
+            start_date:
+              componentInputParameter: start_date
+        taskInfo:
+          name: ingest-data
+      train-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-model
+        dependentTasks:
+        - build-features
+        inputs:
+          artifacts:
+            features:
+              taskOutputArtifact:
+                outputArtifactKey: features
+                producerTask: build-features
+          parameters:
+            mape_threshold:
+              componentInputParameter: mape_threshold
+        taskInfo:
+          name: train-model
+  inputDefinitions:
+    parameters:
+      mape_threshold:
+        defaultValue: 15.0
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      start_date:
+        defaultValue: '2018-01-01'
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.18.1
