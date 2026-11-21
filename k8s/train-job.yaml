@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: btc-train
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: train
+          image: hamzamumtaz1524/btc-forecast:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.train_forecast", "--if-missing"]
+          envFrom:
+            - configMapRef:
+                name: btc-forecast-config
+            - secretRef:
+                name: btc-forecast-secret
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: btc-models-pvc
